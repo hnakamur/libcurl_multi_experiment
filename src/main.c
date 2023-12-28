@@ -41,9 +41,7 @@
  * Download an HTTP file and upload an FTP file simultaneously.
  */
 
-#define HANDLECOUNT 2 /* Number of simultaneous transfers */
-#define HTTP_HANDLE 0 /* Index for the HTTP transfer */
-#define FTP_HANDLE  1 /* Index for the FTP transfer */
+#define HANDLECOUNT 80 /* Number of simultaneous transfers */
 
 int
 main(void)
@@ -58,14 +56,10 @@ main(void)
   int msgs_left; /* how many messages are left */
 
   /* Allocate one CURL handle per transfer */
-  for (i = 0; i < HANDLECOUNT; i++)
+  for (i = 0; i < HANDLECOUNT; i++) {
     handles[i] = curl_easy_init();
-
-  /* set the options (I left out a few, you will get the point anyway) */
-  curl_easy_setopt(handles[HTTP_HANDLE], CURLOPT_URL, "https://example.com");
-
-  curl_easy_setopt(handles[FTP_HANDLE], CURLOPT_URL, "ftp://example.com");
-  curl_easy_setopt(handles[FTP_HANDLE], CURLOPT_UPLOAD, 1L);
+    curl_easy_setopt(handles[i], CURLOPT_URL, "http://localhost");
+  }
 
   /* init a multi stack */
   multi_handle = curl_multi_init();
@@ -96,14 +90,7 @@ main(void)
           break;
       }
 
-      switch (idx) {
-      case HTTP_HANDLE:
-        printf("HTTP transfer completed with status %d\n", msg->data.result);
-        break;
-      case FTP_HANDLE:
-        printf("FTP transfer completed with status %d\n", msg->data.result);
-        break;
-      }
+      printf("HTTP transfer %d completed with status %d\n", idx, msg->data.result);
     }
   }
 
