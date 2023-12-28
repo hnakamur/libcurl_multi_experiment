@@ -33,6 +33,7 @@
 /* somewhat unix-specific */
 #include <sys/time.h>
 #include <unistd.h>
+#include <time.h>
 
 /* curl stuff */
 #include <curl/curl.h>
@@ -44,10 +45,35 @@
 #define REQBODYSIZE 1048576 /* Request body size (=1MiB) */
 #define HANDLECOUNT 511     /* Number of simultaneous transfers */
 
+static char req_body[REQBODYSIZE + 1];
+
+typedef struct {
+  const char *req_body;
+  size_t bytes_sent;
+} read_req_body_data_t;
+
+size_t
+read_req_body(char *buffer, size_t size, size_t nitems, void *userdata)
+{
+  read_req_body_data_t *data = (read_req_body_data_t *)userdata;
+  size_t to_send             = size * nitems;
+  memcpy(buffer, data->req_body + data->bytes_sent, to_send);
+
+  /* sleep 1ms */
+  struct timespec sleep_time;
+  sleep_time.tv_sec  = 0;
+  sleep_time.tv_nsec = 1 * 1000 * 1000; // 1ms
+  nanosleep(&sleep_time, NULL);
+
+  data->bytes_sent += to_send;
+  fprintf(stderr, "to_send=%lu, bytes_sent=%lu\n", to_send, data->bytes_sent);
+  return to_send;
+}
+
 int
 main(void)
 {
-  static char req_body[REQBODYSIZE + 1];
+  read_req_body_data_t data[HANDLECOUNT];
   CURL *handles[HANDLECOUNT];
   CURLM *multi_handle;
 
@@ -64,14 +90,35 @@ main(void)
 
   /* Allocate one CURL handle per transfer */
   for (i = 0; i < HANDLECOUNT; i++) {
-    handles[i] = curl_easy_init();
-    res        = curl_easy_setopt(handles[i], CURLOPT_URL, "http://localhost/limit-mem");
+    data[i].req_body   = req_body;
+    data[i].bytes_sent = 0;
+    handles[i]         = curl_easy_init();
+
+    res = curl_easy_setopt(handles[i], CURLOPT_URL, "http://localhost/limit-mem");
     if (res != CURLE_OK) {
       fprintf(stderr, "cannot set url: %s", curl_easy_strerror(res));
     }
-    res = curl_easy_setopt(handles[i], CURLOPT_POSTFIELDS, req_body);
+    res = curl_easy_setopt(handles[i], CURLOPT_INFILESIZE_LARGE, sizeof(req_body) - 1);
     if (res != CURLE_OK) {
-      fprintf(stderr, "cannot set request body: %s", curl_easy_strerror(res));
+      fprintf(stderr, "cannot set request body length: %s\n", curl_easy_strerror(res));
+    }
+    struct curl_slist *headers = NULL;
+    headers                    = curl_slist_append(headers, "Content-Type: text/plain");
+    res                        = curl_easy_setopt(handles[i], CURLOPT_HTTPHEADER, headers);
+    if (res != CURLE_OK) {
+      fprintf(stderr, "cannot set request header: %s\n", curl_easy_strerror(res));
+    }
+    res = curl_easy_setopt(handles[i], CURLOPT_READFUNCTION, read_req_body);
+    if (res != CURLE_OK) {
+      fprintf(stderr, "cannot set request read function: %s\n", curl_easy_strerror(res));
+    }
+    res = curl_easy_setopt(handles[i], CURLOPT_UPLOAD, 1L);
+    if (res != CURLE_OK) {
+      fprintf(stderr, "cannot enable upload: %s\n", curl_easy_strerror(res));
+    }
+    res = curl_easy_setopt(handles[i], CURLOPT_READDATA, &data[i]);
+    if (res != CURLE_OK) {
+      fprintf(stderr, "cannot set request read data: %s\n", curl_easy_strerror(res));
     }
   }
 
@@ -83,7 +130,7 @@ main(void)
   for (i = 0; i < HANDLECOUNT; i++) {
     mc = curl_multi_add_handle(multi_handle, handles[i]);
     if (mc != CURLM_OK) {
-      fprintf(stderr, "cannot add handle: %s", curl_multi_strerror(mc));
+      fprintf(stderr, "cannot add handle: %s\n", curl_multi_strerror(mc));
     }
   }
 
@@ -95,7 +142,7 @@ main(void)
       mc = curl_multi_poll(multi_handle, NULL, 0, 1000, NULL);
 
     if (mc != CURLM_OK) {
-      fprintf(stderr, "cannot poll handle: %s", curl_multi_strerror(mc));
+      fprintf(stderr, "cannot poll handle: %s\n", curl_multi_strerror(mc));
       break;
     }
   }
@@ -119,14 +166,14 @@ main(void)
   for (i = 0; i < HANDLECOUNT; i++) {
     mc = curl_multi_remove_handle(multi_handle, handles[i]);
     if (mc != CURLM_OK) {
-      fprintf(stderr, "cannot remove handle: %s", curl_multi_strerror(mc));
+      fprintf(stderr, "cannot remove handle: %s\n", curl_multi_strerror(mc));
     }
     curl_easy_cleanup(handles[i]);
   }
 
   mc = curl_multi_cleanup(multi_handle);
   if (mc != CURLM_OK) {
-    fprintf(stderr, "cannot remove handle: %s", curl_multi_strerror(mc));
+    fprintf(stderr, "cannot remove handle: %s\n", curl_multi_strerror(mc));
   }
 
   return 0;
