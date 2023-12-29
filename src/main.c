@@ -146,9 +146,10 @@ main(int argc, char *argv[])
     case 'h':
     case OPT_HELP:
       fprintf(stderr, "Usage: %s [OPTIONS]\n\n", argv[0]);
-      fprintf(stderr, "-u, --url:          target URL (required).\n");
-      fprintf(stderr, "-c, --concurrency:  number of clients (between 1 and 511, default 511).\n");
-      fprintf(stderr, "-h, --help:         show this help.\n");
+      fprintf(stderr, "-u, --url <url>                          Target URL (required).\n");
+      fprintf(stderr, "-c, --concurrency <concurrency>          Number of clients (between 1 and 511, default 511).\n");
+      fprintf(stderr, "--resolve <[+]host:port:addr[,addr]...>  Provide a custom address for a specific host and port pair.\n");
+      fprintf(stderr, "-h, --help                               Show this help.\n");
       return 2;
     }
   }
