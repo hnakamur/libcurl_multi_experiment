@@ -42,26 +42,32 @@ read_req_body(char *buffer, size_t size, size_t nitems, void *userdata)
 }
 
 static bool
-init_handle(kvec_curl_ptr_t *handles, kvec_read_req_body_data_t *req_body_userdata, int i)
+init_handle(kvec_curl_ptr_t *handles, kvec_read_req_body_data_t *req_body_userdata, int i, const char *url,
+            struct curl_slist *headers, struct curl_slist *resolve_list)
 {
   kv_A(*req_body_userdata, i).req_body   = common_req_body;
   kv_A(*req_body_userdata, i).bytes_sent = 0;
   kv_A(*handles, i)                      = curl_easy_init();
 
   CURLcode res;
-  res = curl_easy_setopt(kv_A(*handles, i), CURLOPT_URL, "http://localhost/limit-mem");
+  res = curl_easy_setopt(kv_A(*handles, i), CURLOPT_URL, url);
   if (res != CURLE_OK) {
     fprintf(stderr, "cannot set url: %s", curl_easy_strerror(res));
     goto error;
+  }
+  if (resolve_list != NULL) {
+    res = curl_easy_setopt(kv_A(*handles, i), CURLOPT_RESOLVE, resolve_list);
+    if (res != CURLE_OK) {
+      fprintf(stderr, "cannot set resolve options: %s\n", curl_easy_strerror(res));
+      goto error;
+    }
   }
   res = curl_easy_setopt(kv_A(*handles, i), CURLOPT_INFILESIZE_LARGE, sizeof(common_req_body) - 1);
   if (res != CURLE_OK) {
     fprintf(stderr, "cannot set request body length: %s\n", curl_easy_strerror(res));
     goto error;
   }
-  struct curl_slist *headers = NULL;
-  headers                    = curl_slist_append(headers, "Content-Type: text/plain");
-  res                        = curl_easy_setopt(kv_A(*handles, i), CURLOPT_HTTPHEADER, headers);
+  res = curl_easy_setopt(kv_A(*handles, i), CURLOPT_HTTPHEADER, headers);
   if (res != CURLE_OK) {
     fprintf(stderr, "cannot set request header: %s\n", curl_easy_strerror(res));
     goto error;
@@ -90,6 +96,7 @@ error:
 enum {
   OPT_URL = 301,
   OPT_CONCURRENCY,
+  OPT_RESOLVE,
   OPT_HELP,
 };
 
@@ -100,12 +107,14 @@ enum {
 int
 main(int argc, char *argv[])
 {
-  const char *url = NULL;
-  int concurrency = DEFAULT_CONCURRENCY;
+  const char *url     = NULL;
+  int concurrency     = DEFAULT_CONCURRENCY;
+  const char *resolve = NULL;
 
   static ko_longopt_t longopts[] = {
     {"url",         ko_required_argument, OPT_URL        },
     {"concurrency", ko_required_argument, OPT_CONCURRENCY},
+    {"resolve",     ko_required_argument, OPT_RESOLVE    },
     {"help",        ko_no_argument,       OPT_HELP       },
     {NULL,          0,                    0              }
   };
@@ -128,6 +137,12 @@ main(int argc, char *argv[])
       concurrency = (int)conc;
       break;
     }
+    case OPT_RESOLVE:
+      if (resolve != NULL) {
+        fprintf(stderr, "multiple --resolve options not supported.\n");
+      }
+      resolve = opt.arg;
+      break;
     case 'h':
     case OPT_HELP:
       fprintf(stderr, "Usage: %s [OPTIONS]\n\n", argv[0]);
@@ -160,26 +175,39 @@ main(int argc, char *argv[])
   memset(common_req_body, 'a', sizeof(common_req_body) - 1);
   common_req_body[sizeof(common_req_body) - 1] = '\0';
 
-  CURLM *multi_handle = curl_multi_init();
-  if (multi_handle == NULL) {
-    fprintf(stderr, "cannot init curl_multi handle.\n");
+  struct curl_slist *headers = NULL;
+  headers                    = curl_slist_append(headers, "Content-Type: text/plain");
+  if (headers == NULL) {
     goto exit3;
   }
 
-  CURLMcode mc;
-  int n_inited_handles;
-  for (n_inited_handles = 0; n_inited_handles < concurrency; n_inited_handles++) {
-    if (!init_handle(&handles, &req_body_userdata, n_inited_handles)) {
+  struct curl_slist *resolve_list = NULL;
+  if (resolve != NULL) {
+    resolve_list = curl_slist_append(resolve_list, resolve);
+    if (resolve_list == NULL) {
       goto exit4;
     }
   }
 
-  int n_added_handles;
-  for (n_added_handles = 0; n_added_handles < concurrency; n_added_handles++) {
+  int n_inited_handles = 0;
+  for (; n_inited_handles < concurrency; n_inited_handles++) {
+    if (!init_handle(&handles, &req_body_userdata, n_inited_handles, url, headers, resolve_list)) {
+      goto exit5;
+    }
+  }
+
+  int n_added_handles = 0;
+  CURLM *multi_handle = curl_multi_init();
+  if (multi_handle == NULL) {
+    fprintf(stderr, "cannot init curl_multi handle.\n");
+    goto exit6;
+  }
+  CURLMcode mc;
+  for (; n_added_handles < concurrency; n_added_handles++) {
     mc = curl_multi_add_handle(multi_handle, kv_A(handles, n_added_handles));
     if (mc != CURLM_OK) {
       fprintf(stderr, "cannot add handle: %s\n", curl_multi_strerror(mc));
-      goto exit5;
+      goto exit6;
     }
   }
 
@@ -193,7 +221,7 @@ main(int argc, char *argv[])
 
     if (mc != CURLM_OK) {
       fprintf(stderr, "cannot poll handle: %s\n", curl_multi_strerror(mc));
-      goto exit5;
+      goto exit6;
     }
   }
 
@@ -216,21 +244,24 @@ main(int argc, char *argv[])
 
   exit_code = 0;
 
-exit5:
+exit6:
   for (int i = 0; i < n_added_handles; ++i) {
     mc = curl_multi_remove_handle(multi_handle, kv_A(handles, i));
     if (mc != CURLM_OK) {
       fprintf(stderr, "cannot remove handle: %s\n", curl_multi_strerror(mc));
     }
   }
-exit4:
-  for (int i = 0; i < n_inited_handles; ++i) {
-    curl_easy_cleanup(kv_A(handles, i));
-  }
   mc = curl_multi_cleanup(multi_handle);
   if (mc != CURLM_OK) {
     fprintf(stderr, "cannot remove handle: %s\n", curl_multi_strerror(mc));
   }
+exit5:
+  for (int i = 0; i < n_inited_handles; ++i) {
+    curl_easy_cleanup(kv_A(handles, i));
+  }
+  curl_slist_free_all(resolve_list);
+exit4:
+  curl_slist_free_all(headers);
 exit3:
   kv_destroy(handles);
 exit2:
