@@ -19,10 +19,13 @@ static char common_req_body[REQBODYSIZE + 1];
 typedef struct {
   const char *req_body;
   size_t bytes_sent;
+  size_t delay_ns;
 } read_req_body_data_t;
 
 typedef kvec_t(read_req_body_data_t) kvec_read_req_body_data_t;
 typedef kvec_t(CURL *) kvec_curl_ptr_t;
+
+#define NS_PER_SEC (1000 * 1000 * 1000)
 
 static size_t
 read_req_body(char *buffer, size_t size, size_t nitems, void *userdata)
@@ -31,11 +34,12 @@ read_req_body(char *buffer, size_t size, size_t nitems, void *userdata)
   size_t to_send             = size * nitems;
   memcpy(buffer, data->req_body + data->bytes_sent, to_send);
 
-  /* sleep 1ms */
-  struct timespec sleep_time;
-  sleep_time.tv_sec  = 0;
-  sleep_time.tv_nsec = 1 * 1000 * 1000;
-  nanosleep(&sleep_time, NULL);
+  if (data->delay_ns > 0) {
+    struct timespec sleep_time;
+    sleep_time.tv_sec  = data->delay_ns / NS_PER_SEC;
+    sleep_time.tv_nsec = data->delay_ns % NS_PER_SEC;
+    nanosleep(&sleep_time, NULL);
+  }
 
   data->bytes_sent += to_send;
   fprintf(stderr, "to_send=%lu, bytes_sent=%lu\n", to_send, data->bytes_sent);
@@ -50,10 +54,11 @@ discard_response_body(char *ptr, size_t size, size_t nmemb, void *userdata)
 
 static bool
 init_handle(kvec_curl_ptr_t *handles, kvec_read_req_body_data_t *req_body_userdata, int i, const char *url,
-            struct curl_slist *headers, struct curl_slist *resolve_list)
+            struct curl_slist *headers, struct curl_slist *resolve_list, size_t delay_ns)
 {
   kv_A(*req_body_userdata, i).req_body   = common_req_body;
   kv_A(*req_body_userdata, i).bytes_sent = 0;
+  kv_A(*req_body_userdata, i).delay_ns   = delay_ns;
   kv_A(*handles, i)                      = curl_easy_init();
 
   CURLcode res;
@@ -109,6 +114,7 @@ enum {
   OPT_URL = 301,
   OPT_CONCURRENCY,
   OPT_RESOLVE,
+  OPT_DELAY,
   OPT_HELP,
 };
 
@@ -118,17 +124,27 @@ enum {
 
 KHASH_MAP_INIT_INT(khash_map_int_int_t, int)
 
+static bool
+has_suffix(const char *s, const char *suffix)
+{
+  int s_len      = strlen(s);
+  int suffix_len = strlen(suffix);
+  return s_len >= suffix_len && strcmp(s + (s_len - suffix_len), suffix) == 0;
+}
+
 int
 main(int argc, char *argv[])
 {
   const char *url     = NULL;
   int concurrency     = DEFAULT_CONCURRENCY;
   const char *resolve = NULL;
+  size_t delay_ns     = 0;
 
   static ko_longopt_t longopts[] = {
     {"url",         ko_required_argument, OPT_URL        },
     {"concurrency", ko_required_argument, OPT_CONCURRENCY},
     {"resolve",     ko_required_argument, OPT_RESOLVE    },
+    {"delay",       ko_required_argument, OPT_DELAY      },
     {"help",        ko_no_argument,       OPT_HELP       },
     {NULL,          0,                    0              }
   };
@@ -157,12 +173,35 @@ main(int argc, char *argv[])
       }
       resolve = opt.arg;
       break;
+    case OPT_DELAY: {
+      size_t unit    = 0;
+      int suffix_len = 0;
+      if (has_suffix(opt.arg, "ms")) {
+        unit       = 1000 * 1000;
+        suffix_len = 2;
+      } else if (has_suffix(opt.arg, "s")) {
+        unit       = 1000 * 1000 * 1000;
+        suffix_len = 1;
+      } else {
+        fprintf(stderr, "unit of delay must be \"s\" or \"ms\".\n");
+        return 2;
+      }
+      char *end;
+      long delay_num = strtol(opt.arg, &end, 10);
+      if (*(end + suffix_len) != '\0' || delay_num < 0) {
+        fprintf(stderr, "delay must be non-negative integer.\n");
+        return 2;
+      }
+      delay_ns = delay_num * unit;
+      break;
+    }
     case 'h':
     case OPT_HELP:
       fprintf(stderr, "Usage: %s [OPTIONS]\n\n", argv[0]);
       fprintf(stderr, "-u, --url <url>                          Target URL (required).\n");
       fprintf(stderr, "-c, --concurrency <concurrency>          Number of clients (between 1 and 511, default 511).\n");
       fprintf(stderr, "--resolve <[+]host:port:addr[,addr]...>  Provide a custom address for a specific host and port pair.\n");
+      fprintf(stderr, "--delay <delay>                          delay in writing request body chunks (ex. 1s, 5ms).\n");
       fprintf(stderr, "-h, --help                               Show this help.\n");
       return 2;
     }
@@ -206,7 +245,7 @@ main(int argc, char *argv[])
 
   int n_inited_handles = 0;
   for (; n_inited_handles < concurrency; n_inited_handles++) {
-    if (!init_handle(&handles, &req_body_userdata, n_inited_handles, url, headers, resolve_list)) {
+    if (!init_handle(&handles, &req_body_userdata, n_inited_handles, url, headers, resolve_list, delay_ns)) {
       goto exit5;
     }
   }
