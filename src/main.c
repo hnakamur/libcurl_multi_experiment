@@ -8,6 +8,7 @@
 #include <time.h>
 
 #include <ketopt.h>
+#include <khash.h>
 #include <kvec.h>
 #include <curl/curl.h>
 
@@ -39,6 +40,12 @@ read_req_body(char *buffer, size_t size, size_t nitems, void *userdata)
   data->bytes_sent += to_send;
   fprintf(stderr, "to_send=%lu, bytes_sent=%lu\n", to_send, data->bytes_sent);
   return to_send;
+}
+
+static size_t
+discard_response_body(char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+  return size * nmemb;
 }
 
 static bool
@@ -77,6 +84,11 @@ init_handle(kvec_curl_ptr_t *handles, kvec_read_req_body_data_t *req_body_userda
     fprintf(stderr, "cannot set request read function: %s\n", curl_easy_strerror(res));
     goto error;
   }
+  res = curl_easy_setopt(kv_A(*handles, i), CURLOPT_WRITEFUNCTION, discard_response_body);
+  if (res != CURLE_OK) {
+    fprintf(stderr, "cannot set request write function: %s\n", curl_easy_strerror(res));
+    goto error;
+  }
   res = curl_easy_setopt(kv_A(*handles, i), CURLOPT_UPLOAD, 1L);
   if (res != CURLE_OK) {
     fprintf(stderr, "cannot enable upload: %s\n", curl_easy_strerror(res));
@@ -103,6 +115,8 @@ enum {
 #define MIN_CONCURRENCY     1
 #define MAX_CONCURRENCY     511
 #define DEFAULT_CONCURRENCY MAX_CONCURRENCY
+
+KHASH_MAP_INIT_INT(khash_map_int_int_t, int)
 
 int
 main(int argc, char *argv[])
@@ -227,6 +241,9 @@ main(int argc, char *argv[])
   }
 
   /* See how the transfers went */
+  int absent;
+  khint_t k;
+  khash_t(khash_map_int_int_t) *h = kh_init(khash_map_int_int_t);
   CURLMsg *msg;  /* for picking up messages with the transfer status */
   int msgs_left; /* how many messages are left */
   while ((msg = curl_multi_info_read(multi_handle, &msgs_left))) {
@@ -239,9 +256,23 @@ main(int argc, char *argv[])
           break;
       }
 
+      long http_code = 0;
+      curl_easy_getinfo(kv_A(handles, i), CURLINFO_RESPONSE_CODE, &http_code);
+      k = kh_put(khash_map_int_int_t, h, (khint32_t)http_code, &absent);
+      if (absent) {
+        kh_value(h, k) = 1;
+      } else {
+        kh_value(h, k) = kh_value(h, k) + 1;
+      }
       printf("HTTP transfer %d completed with status %d\n", i, msg->data.result);
     }
   }
+  for (k = kh_begin(h); k != kh_end(h); ++k) {
+    if (kh_exist(h, k)) {
+      printf("status:%d, count:%d\n", kh_key(h, k), kh_value(h, k));
+    }
+  }
+  kh_destroy(khash_map_int_int_t, h);
 
   exit_code = 0;
 
